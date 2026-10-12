@@ -1,7 +1,4 @@
 <#
-Proprietário, nome: Erik Pereira Ghijs
-Contato: eghijs@gmail.com
-
 Organização, projeto: Diagnostico-Rede
 Finalidade do script: Coletar somente hostname, MAC Wi-Fi,
 MAC da rede cabeada e data da coleta.
@@ -11,18 +8,6 @@ sem sobrescrever arquivos existentes.
 Ambiente previsto: Windows 10 e Windows 11, Windows PowerShell 5.1.
 Classificação: Uso interno, confidencial
 Controle de versão: Versão 1.1.0, data 12-10-2026
-
-Aviso legal: Script de propriedade exclusiva do autor.
-Uso restrito ao ambiente interno autorizado.
-Proibida cópia, redistribuição, modificação ou uso sem autorização formal.
-Uso indevido sujeito a sanções legais.
-
-Checklist de segurança: Validação dos adaptadores, MACs e caminhos.
-Mensagens de resultado na interface.
-Sem logs adicionais para manter somente as informações solicitadas.
-Modo DryRun disponível.
-Não exige privilégios elevados.
-Não altera configurações de rede ou políticas de execução.
 #>
 
 #Requires -Version 5.1
