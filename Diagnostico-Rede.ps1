@@ -131,7 +131,7 @@ function Get-NetworkDiagnostic {
                 $tipo = 'Cabo'
             }
 
-            $macBruto = [string]$adaptador.MacAddress
+            $macBruto = [string](@($adaptador.NetworkAddresses) | Select-Object -First 1)
             $macLimpo = $macBruto -replace '[-:\.\s]', ''
             $macAtual = 'Não disponível'
 
