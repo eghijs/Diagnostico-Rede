@@ -3,25 +3,25 @@ Proprietário, nome: Erik Pereira Ghijs
 Contato: eghijs@gmail.com
 
 Organização, projeto: Diagnostico-Rede
-Finalidade do script: Identificar o responsável pela execução,
-coletar hostname e MAC dos adaptadores físicos e salvar relatórios
-na Área de Trabalho, organizados por data, sem sobrescrever arquivos.
+Finalidade do script: Identificar automaticamente a conta da execução,
+coletar hostname e MAC dos adaptadores físicos e salvar relatório
+na Área de Trabalho, organizado por data, sem sobrescrever arquivos.
 
 Ambiente previsto: Windows 10 e Windows 11, Windows PowerShell 5.1.
 Classificação: Uso interno, confidencial
 Controle de versão: Versão 1.0.0, data 12-10-2026
-Revisão: 03.
+Revisão: 04.
 
 Aviso legal: Script de propriedade exclusiva do autor.
 Uso restrito ao ambiente interno autorizado.
 Proibida cópia, redistribuição, modificação ou uso sem autorização formal.
 Uso indevido sujeito a sanções legais.
 
-Checklist de segurança: Validação de identidade, nome e caminhos.
+Checklist de segurança: Validação da identidade e dos caminhos.
 Logs locais. Modo DryRun disponível.
 Não exige privilégios elevados.
-Não altera configurações de rede ou políticas de execução.
-Em sessão elevada, registra a identidade que executou o processo.
+Não altera contas, configurações de rede ou políticas de execução.
+O nome completo depende das informações disponíveis na conta.
 #>
 
 #Requires -Version 5.1
@@ -43,9 +43,9 @@ Add-Type -AssemblyName System.Drawing
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+$script:Versao = '1.0.0, revisão 04'
 $script:Resultado = $null
 $script:Simulacao = [bool]$DryRun
-$script:Versao = '1.0.0, revisão 03'
 
 $identidade = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 
@@ -65,84 +65,180 @@ finally {
     $identidade.Dispose()
 }
 
-# Respeita o redirecionamento da Área de Trabalho, inclusive OneDrive.
 $areaTrabalho = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::DesktopDirectory
 )
 
 if ([string]::IsNullOrWhiteSpace($areaTrabalho)) {
-    throw 'Não foi possível localizar a Área de Trabalho do usuário.'
+    throw 'Não foi possível localizar a Área de Trabalho.'
 }
 
 $script:PastaBase = Join-Path $areaTrabalho 'Diagnostico-Rede'
 
-function Get-FullName {
-    # Consulta somente contas locais usando o SID da execução.
-    # Se o nome não estiver disponível, o operador deverá preenchê-lo.
+function Get-AutomaticIdentity {
+    $nome = ''
+    $origem = 'Não disponível'
+
+    # Primeira tentativa, cadastro da conta local correspondente ao SID.
     try {
         $conta = Get-CimInstance `
             -ClassName Win32_UserAccount `
             -Filter "LocalAccount = TRUE AND SID = '$script:Sid'" `
+            -OperationTimeoutSec 10 `
             -ErrorAction Stop |
             Select-Object -First 1
 
-        if (
-            $null -ne $conta -and
-            -not [string]::IsNullOrWhiteSpace([string]$conta.FullName)
-        ) {
-            return ([string]$conta.FullName).Trim()
+        if ($null -ne $conta) {
+            $nome = ([string]$conta.FullName).Trim()
+
+            if (-not [string]::IsNullOrWhiteSpace($nome)) {
+                $origem = 'Cadastro da conta local'
+            }
         }
     }
     catch {
-        # A ausência do nome não impede a identificação pelo login.
+        # Continua com as outras formas de consulta.
     }
 
-    return ''
+    # Segunda tentativa, módulo de contas locais, quando disponível.
+    if ([string]::IsNullOrWhiteSpace($nome)) {
+        try {
+            if (
+                $null -ne (
+                    Get-Command Get-LocalUser -ErrorAction SilentlyContinue
+                )
+            ) {
+                $sidObjeto = New-Object `
+                    System.Security.Principal.SecurityIdentifier(
+                        $script:Sid
+                    )
+
+                $contaLocal = Get-LocalUser `
+                    -SID $sidObjeto `
+                    -ErrorAction Stop
+
+                $nome = ([string]$contaLocal.FullName).Trim()
+
+                if (-not [string]::IsNullOrWhiteSpace($nome)) {
+                    $origem = 'Cadastro de usuário local'
+                }
+            }
+        }
+        catch {
+            # Conta de domínio ou nome local não disponível.
+        }
+    }
+
+    # Terceira tentativa, nome de exibição da identidade do Windows.
+    if ([string]::IsNullOrWhiteSpace($nome)) {
+        try {
+            if (
+                $null -eq (
+                    'DiagnosticoRede.NativeIdentity' -as [type]
+                )
+            ) {
+                Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+
+namespace DiagnosticoRede
+{
+    public static class NativeIdentity
+    {
+        [DllImport(
+            "secur32.dll",
+            EntryPoint = "GetUserNameExW",
+            CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        private static extern bool GetUserNameEx(
+            int nameFormat,
+            StringBuilder userName,
+            ref uint size);
+
+        public static string GetDisplayName()
+        {
+            uint size = 512;
+            StringBuilder buffer = new StringBuilder((int)size);
+
+            if (GetUserNameEx(3, buffer, ref size))
+                return buffer.ToString();
+
+            int error = Marshal.GetLastWin32Error();
+
+            if (error == 234 && size > 0 && size <= 32768)
+            {
+                buffer = new StringBuilder((int)size);
+
+                if (GetUserNameEx(3, buffer, ref size))
+                    return buffer.ToString();
+            }
+
+            return String.Empty;
+        }
+    }
+}
+'@
+            }
+
+            $nome = (
+                [DiagnosticoRede.NativeIdentity]::GetDisplayName()
+            ).Trim()
+
+            if (-not [string]::IsNullOrWhiteSpace($nome)) {
+                $origem = 'Nome de exibição do Windows'
+            }
+        }
+        catch {
+            # Não solicita nome, senha ou elevação.
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($nome)) {
+        $nome = 'Nome completo não disponível'
+    }
+
+    [pscustomobject]@{
+        NomeCompleto = ($nome -replace '\s+', ' ').Trim()
+        OrigemNome   = $origem
+        Login        = $script:Login
+        Sid          = $script:Sid
+        Elevado      = $script:Elevado
+    }
 }
 
 function Write-DiagnosticLog {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Mensagem
-    )
+    param([string]$Mensagem)
 
     if ($script:Simulacao) {
         return
     }
 
     try {
-        $pastaLogs = Join-Path $script:PastaBase 'Logs'
-        [void][System.IO.Directory]::CreateDirectory($pastaLogs)
+        $pasta = Join-Path $script:PastaBase 'Logs'
+        [void][System.IO.Directory]::CreateDirectory($pasta)
 
-        $arquivoLog = Join-Path $pastaLogs (
+        $arquivo = Join-Path $pasta (
             (Get-Date -Format 'dd-MM-yyyy') + '.log'
         )
 
-        $mensagemLimpa = $Mensagem -replace '[\r\n]', ' '
-
         $linha = '{0}  Login, {1}. {2}{3}' -f (
             Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        ), $script:Login, $mensagemLimpa, [Environment]::NewLine
+        ), $script:Login, (
+            $Mensagem -replace '[\r\n]', ' '
+        ), [Environment]::NewLine
 
         $utf8 = New-Object System.Text.UTF8Encoding($true)
-
-        [System.IO.File]::AppendAllText(
-            $arquivoLog,
-            $linha,
-            $utf8
-        )
+        [System.IO.File]::AppendAllText($arquivo, $linha, $utf8)
     }
     catch {
-        # Falha de log não interrompe o diagnóstico.
         [System.Diagnostics.Debug]::WriteLine($_.Exception.Message)
     }
 }
 
 function ConvertTo-Mac {
-    param(
-        [AllowNull()]
-        [string]$Endereco
-    )
+    param([AllowNull()][string]$Endereco)
 
     $limpo = $Endereco -replace '[-:\.\s]', ''
 
@@ -160,11 +256,13 @@ function ConvertTo-Mac {
 }
 
 function Get-NetworkDiagnostic {
-    # Inclui adaptadores físicos conectados ou desconectados.
+    $responsavel = Get-AutomaticIdentity
+
     $adaptadores = @(
         Get-CimInstance `
             -Namespace 'root/StandardCimv2' `
             -ClassName 'MSFT_NetAdapter' `
+            -OperationTimeoutSec 15 `
             -ErrorAction Stop
     )
 
@@ -194,14 +292,10 @@ function Get-NetworkDiagnostic {
 
             $macs = @(
                 foreach ($endereco in @($adaptador.NetworkAddresses)) {
-                    $normalizado = ConvertTo-Mac (
-                        [string]$endereco
-                    )
+                    $mac = ConvertTo-Mac ([string]$endereco)
 
-                    if (
-                        -not [string]::IsNullOrWhiteSpace($normalizado)
-                    ) {
-                        $normalizado
+                    if (-not [string]::IsNullOrWhiteSpace($mac)) {
+                        $mac
                     }
                 }
             )
@@ -241,76 +335,46 @@ function Get-NetworkDiagnostic {
 
     [pscustomobject]@{
         Hostname   = [Environment]::MachineName
-        Login      = $script:Login
-        Sid        = $script:Sid
-        Elevado    = $script:Elevado
+        Responsavel = $responsavel
         Data       = Get-Date
         Interfaces = @($interfaces | Sort-Object Tipo, Indice)
     }
 }
 
 function Format-NetworkDiagnostic {
-    param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Resultado,
-
-        [AllowEmptyString()]
-        [string]$NomeCompleto
-    )
-
-    $wifi = @(
-        $Resultado.Interfaces |
-        Where-Object { $_.Tipo -eq 'Wi-Fi' }
-    )
-
-    $cabo = @(
-        $Resultado.Interfaces |
-        Where-Object { $_.Tipo -eq 'Cabo' }
-    )
-
-    $resumoWifi = if ($wifi.Count -gt 0) {
-        ($wifi | ForEach-Object { $_.MacAtual }) -join ', '
-    }
-    else {
-        'Nenhum adaptador identificado'
-    }
-
-    $resumoCabo = if ($cabo.Count -gt 0) {
-        ($cabo | ForEach-Object { $_.MacAtual }) -join ', '
-    }
-    else {
-        'Nenhum adaptador identificado'
-    }
-
-    $nomeRelatorio = if (
-        [string]::IsNullOrWhiteSpace($NomeCompleto)
-    ) {
-        'Preencher antes de salvar'
-    }
-    else {
-        ($NomeCompleto -replace '\s+', ' ').Trim()
-    }
-
-    $elevacao = if ($Resultado.Elevado) {
-        'Sim'
-    }
-    else {
-        'Não'
-    }
+    param([psobject]$Resultado)
 
     $linhas = New-Object 'System.Collections.Generic.List[string]'
+    $responsavel = $Resultado.Responsavel
 
     $linhas.Add('DIAGNÓSTICO DE REDE')
     $linhas.Add('Versão ' + $script:Versao)
     $linhas.Add('')
-    $linhas.Add('Nome completo informado: ' + $nomeRelatorio)
-    $linhas.Add('Login da execução: ' + $Resultado.Login)
-    $linhas.Add('SID da conta: ' + $Resultado.Sid)
+    $linhas.Add('Nome completo: ' + $responsavel.NomeCompleto)
+    $linhas.Add('Origem do nome: ' + $responsavel.OrigemNome)
+    $linhas.Add('Login da execução: ' + $responsavel.Login)
+    $linhas.Add('SID da conta: ' + $responsavel.Sid)
+
+    $elevacao = if ($responsavel.Elevado) { 'Sim' } else { 'Não' }
     $linhas.Add('Execução elevada: ' + $elevacao)
     $linhas.Add('')
     $linhas.Add('Hostname: ' + $Resultado.Hostname)
-    $linhas.Add('Mac Wi-Fi: ' + $resumoWifi)
-    $linhas.Add('Mac Cabo: ' + $resumoCabo)
+
+    foreach ($tipo in @('Wi-Fi', 'Cabo')) {
+        $selecionados = @(
+            $Resultado.Interfaces |
+            Where-Object { $_.Tipo -eq $tipo }
+        )
+
+        $resumo = if ($selecionados.Count -gt 0) {
+            ($selecionados | ForEach-Object { $_.MacAtual }) -join ', '
+        }
+        else {
+            'Nenhum adaptador identificado'
+        }
+
+        $linhas.Add('Mac ' + $tipo + ': ' + $resumo)
+    }
 
     $linhas.Add(
         'Data da coleta: ' +
@@ -336,21 +400,20 @@ function Format-NetworkDiagnostic {
     }
 
     $linhas.Add(
-        'O login identifica a conta que executou este processo.'
+        'A identidade corresponde à conta que executou o processo.'
     )
-
     $linhas.Add(
-        'O nome completo é informado ou confirmado pelo operador.'
+        'O nome é consultado automaticamente, sem preenchimento manual.'
     )
-
+    $linhas.Add(
+        'O nome disponível no cadastro pode estar incompleto.'
+    )
     $linhas.Add(
         'O MAC atual pode diferir do permanente por randomização ' +
         'do Wi-Fi ou configuração do adaptador.'
     )
-
     $linhas.Add(
-        'A classificação e o MAC permanente dependem das ' +
-        'informações disponibilizadas pelo driver.'
+        'A classificação e o MAC permanente dependem do driver.'
     )
 
     return $linhas -join [Environment]::NewLine
@@ -358,89 +421,59 @@ function Format-NetworkDiagnostic {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Diagnóstico de Rede, versão ' + $script:Versao
-$form.ClientSize = New-Object System.Drawing.Size(820, 690)
-$form.MinimumSize = New-Object System.Drawing.Size(750, 600)
+$form.ClientSize = New-Object System.Drawing.Size(820, 650)
+$form.MinimumSize = New-Object System.Drawing.Size(750, 550)
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 
-$lblNome = New-Object System.Windows.Forms.Label
-$lblNome.Text = 'Nome completo'
-$lblNome.Location = New-Object System.Drawing.Point(20, 15)
-$lblNome.Size = New-Object System.Drawing.Size(150, 25)
-$form.Controls.Add($lblNome)
-
-$campoNome = New-Object System.Windows.Forms.TextBox
-$campoNome.Location = New-Object System.Drawing.Point(175, 12)
-$campoNome.Size = New-Object System.Drawing.Size(625, 28)
-$campoNome.Anchor = 'Top, Left, Right'
-$campoNome.MaxLength = 150
-$campoNome.Text = Get-FullName
-$form.Controls.Add($campoNome)
-
-$lblLogin = New-Object System.Windows.Forms.Label
-$lblLogin.Text = 'Login da execução, ' + $script:Login
-$lblLogin.Location = New-Object System.Drawing.Point(20, 50)
-$lblLogin.Size = New-Object System.Drawing.Size(780, 25)
-$lblLogin.Anchor = 'Top, Left, Right'
-$form.Controls.Add($lblLogin)
-
-$lblModo = New-Object System.Windows.Forms.Label
-$lblModo.Location = New-Object System.Drawing.Point(20, 80)
-$lblModo.Size = New-Object System.Drawing.Size(780, 25)
-$lblModo.Anchor = 'Top, Left, Right'
-
-$lblModo.Text = if ($script:Elevado) {
-    'Sessão elevada. O login registrado é a conta desta execução.'
-}
-else {
-    'Execução com usuário comum, sem necessidade de administrador.'
-}
-
-$form.Controls.Add($lblModo)
-
-$lblDestino = New-Object System.Windows.Forms.Label
-$lblDestino.Text = 'Destino, Área de Trabalho, pasta Diagnostico-Rede.'
-$lblDestino.Location = New-Object System.Drawing.Point(20, 110)
-$lblDestino.Size = New-Object System.Drawing.Size(780, 25)
-$lblDestino.Anchor = 'Top, Left, Right'
-$form.Controls.Add($lblDestino)
+$info = New-Object System.Windows.Forms.Label
+$info.Location = New-Object System.Drawing.Point(20, 15)
+$info.Size = New-Object System.Drawing.Size(780, 65)
+$info.Anchor = 'Top, Left, Right'
+$info.Text = (
+    'Identificação automática. Login, ' + $script:Login +
+    [Environment]::NewLine +
+    'Destino, Área de Trabalho, pasta Diagnostico-Rede.'
+)
+$form.Controls.Add($info)
 
 $texto = New-Object System.Windows.Forms.TextBox
-$texto.Location = New-Object System.Drawing.Point(20, 145)
-$texto.Size = New-Object System.Drawing.Size(780, 435)
+$texto.Location = New-Object System.Drawing.Point(20, 90)
+$texto.Size = New-Object System.Drawing.Size(780, 450)
 $texto.Multiline = $true
 $texto.ReadOnly = $true
 $texto.ScrollBars = 'Both'
 $texto.WordWrap = $false
 $texto.Anchor = 'Top, Bottom, Left, Right'
 $texto.Font = New-Object System.Drawing.Font('Consolas', 10)
-$texto.Text = 'Informe ou confirme o nome completo e clique em Coletar.'
+$texto.Text = 'Clique em Coletar. Não é necessário digitar o nome.'
 $form.Controls.Add($texto)
 
 $status = New-Object System.Windows.Forms.Label
-$status.Location = New-Object System.Drawing.Point(20, 590)
+$status.Location = New-Object System.Drawing.Point(20, 550)
 $status.Size = New-Object System.Drawing.Size(780, 35)
 $status.Anchor = 'Bottom, Left, Right'
-
 $status.Text = if ($script:Simulacao) {
     'Modo DryRun, nenhuma gravação será realizada.'
 }
-else {
-    'Pronto para coletar.'
+elseif ($script:Elevado) {
+    'Sessão elevada. Será registrada a conta desta execução.'
 }
-
+else {
+    'Pronto. Execução sem privilégios administrativos.'
+}
 $form.Controls.Add($status)
 
 $btnColetar = New-Object System.Windows.Forms.Button
 $btnColetar.Text = 'Coletar'
-$btnColetar.Location = New-Object System.Drawing.Point(20, 640)
+$btnColetar.Location = New-Object System.Drawing.Point(20, 600)
 $btnColetar.Size = New-Object System.Drawing.Size(130, 32)
 $btnColetar.Anchor = 'Bottom, Left'
 $form.Controls.Add($btnColetar)
 
 $btnSalvar = New-Object System.Windows.Forms.Button
 $btnSalvar.Text = 'Salvar relatório'
-$btnSalvar.Location = New-Object System.Drawing.Point(165, 640)
+$btnSalvar.Location = New-Object System.Drawing.Point(165, 600)
 $btnSalvar.Size = New-Object System.Drawing.Size(160, 32)
 $btnSalvar.Anchor = 'Bottom, Left'
 $btnSalvar.Enabled = $false
@@ -448,57 +481,43 @@ $form.Controls.Add($btnSalvar)
 
 $btnFechar = New-Object System.Windows.Forms.Button
 $btnFechar.Text = 'Fechar'
-$btnFechar.Location = New-Object System.Drawing.Point(670, 640)
+$btnFechar.Location = New-Object System.Drawing.Point(670, 600)
 $btnFechar.Size = New-Object System.Drawing.Size(130, 32)
 $btnFechar.Anchor = 'Bottom, Right'
 $form.Controls.Add($btnFechar)
-
-$campoNome.Add_TextChanged({
-    if ($null -ne $script:Resultado) {
-        $texto.Text = Format-NetworkDiagnostic `
-            -Resultado $script:Resultado `
-            -NomeCompleto $campoNome.Text
-    }
-})
 
 $btnColetar.Add_Click({
     $btnColetar.Enabled = $false
     $btnSalvar.Enabled = $false
     $script:Resultado = $null
     $form.UseWaitCursor = $true
-    $status.Text = 'Consultando os adaptadores de rede.'
+    $status.Text = 'Identificando a conta e consultando a rede.'
     $form.Refresh()
 
     try {
         $script:Resultado = Get-NetworkDiagnostic
+        $texto.Text = Format-NetworkDiagnostic $script:Resultado
 
-        $texto.Text = Format-NetworkDiagnostic `
-            -Resultado $script:Resultado `
-            -NomeCompleto $campoNome.Text
-
-        $status.Text = (
-            'Coleta concluída. Adaptadores físicos encontrados, {0}.' -f
-            $script:Resultado.Interfaces.Count
-        )
+        $status.Text = if (
+            $script:Resultado.Responsavel.OrigemNome -eq 'Não disponível'
+        ) {
+            'Coleta concluída. Nome indisponível, login identificado.'
+        }
+        else {
+            'Coleta concluída. Nome e login identificados automaticamente.'
+        }
 
         $btnSalvar.Enabled = $true
-
         Write-DiagnosticLog (
-            'Coleta concluída. Hostname, ' +
-            $script:Resultado.Hostname
+            'Coleta concluída. Hostname, ' + $script:Resultado.Hostname
         )
     }
     catch {
-        $mensagemErro = $_.Exception.Message
-
+        $erroColeta = $_.Exception.Message
         $texto.Text = 'Falha na coleta.' +
-            [Environment]::NewLine + $mensagemErro
-
+            [Environment]::NewLine + $erroColeta
         $status.Text = 'Não foi possível concluir o diagnóstico.'
-
-        Write-DiagnosticLog (
-            'Falha na coleta. ' + $mensagemErro
-        )
+        Write-DiagnosticLog ('Falha na coleta. ' + $erroColeta)
     }
     finally {
         $form.UseWaitCursor = $false
@@ -508,22 +527,6 @@ $btnColetar.Add_Click({
 
 $btnSalvar.Add_Click({
     if ($null -eq $script:Resultado) {
-        return
-    }
-
-    $nome = ($campoNome.Text -replace '\s+', ' ').Trim()
-
-    if (
-        $nome.Length -lt 3 -or
-        ($nome -split ' ').Count -lt 2
-    ) {
-        [void][System.Windows.Forms.MessageBox]::Show(
-            $form,
-            'Informe o nome completo, incluindo nome e sobrenome.',
-            'Identificação do responsável'
-        )
-
-        [void]$campoNome.Focus()
         return
     }
 
@@ -544,48 +547,37 @@ $btnSalvar.Add_Click({
             throw 'Hostname inválido para nome de arquivo.'
         }
 
-        $arquivo = Join-Path $pastaDia (
-            $nomeSeguro + '.txt'
-        )
+        $arquivo = Join-Path $pastaDia ($nomeSeguro + '.txt')
 
         if ($script:Simulacao) {
             $status.Text = 'DryRun, relatório não gravado.'
-
             [void][System.Windows.Forms.MessageBox]::Show(
                 $form,
                 'O relatório seria salvo em ' + $arquivo,
                 'Simulação'
             )
-
             return
         }
 
         [void][System.IO.Directory]::CreateDirectory($pastaDia)
 
         if ([System.IO.File]::Exists($arquivo)) {
-            $status.Text = 'O relatório deste computador já existe.'
-
+            $status.Text = 'O relatório já existe e foi preservado.'
             [void][System.Windows.Forms.MessageBox]::Show(
                 $form,
                 'O arquivo já existe e foi preservado.' +
                     [Environment]::NewLine + $arquivo,
                 'Relatório existente'
             )
-
             return
         }
 
-        $conteudo = Format-NetworkDiagnostic `
-            -Resultado $script:Resultado `
-            -NomeCompleto $nome
-
+        $conteudo = Format-NetworkDiagnostic $script:Resultado
         $utf8 = New-Object System.Text.UTF8Encoding($true)
-
         $bytes = $utf8.GetPreamble() + $utf8.GetBytes(
             $conteudo + [Environment]::NewLine
         )
 
-        # CreateNew impede sobrescrita, inclusive em execução simultânea.
         $stream = [System.IO.File]::Open(
             $arquivo,
             [System.IO.FileMode]::CreateNew,
@@ -594,19 +586,13 @@ $btnSalvar.Add_Click({
         )
 
         $arquivoCriado = $true
-
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Dispose()
         $stream = $null
-
         $arquivoCriado = $false
 
         $status.Text = 'Relatório salvo na Área de Trabalho.'
-
-        Write-DiagnosticLog (
-            'Relatório salvo. Responsável, ' +
-            $nome + '. Arquivo, ' + $arquivo
-        )
+        Write-DiagnosticLog ('Relatório salvo. ' + $arquivo)
 
         [void][System.Windows.Forms.MessageBox]::Show(
             $form,
@@ -615,14 +601,13 @@ $btnSalvar.Add_Click({
         )
     }
     catch {
-        $mensagemErro = $_.Exception.Message
+        $erroGravacao = $_.Exception.Message
 
         if ($null -ne $stream) {
             $stream.Dispose()
             $stream = $null
         }
 
-        # Remove somente o arquivo incompleto criado nesta tentativa.
         if ($arquivoCriado -and $null -ne $arquivo) {
             try {
                 [System.IO.File]::Delete($arquivo)
@@ -635,14 +620,11 @@ $btnSalvar.Add_Click({
         }
 
         $status.Text = 'Não foi possível salvar o relatório.'
-
-        Write-DiagnosticLog (
-            'Falha na gravação. ' + $mensagemErro
-        )
+        Write-DiagnosticLog ('Falha na gravação. ' + $erroGravacao)
 
         [void][System.Windows.Forms.MessageBox]::Show(
             $form,
-            $mensagemErro,
+            $erroGravacao,
             'Falha na gravação'
         )
     }
