@@ -19,7 +19,7 @@ Logs e modo DryRun implementados pelo diagnostico.
 Nao exige privilegios elevados.
 #>
 
-$diagnosticoUrl = 'https://scripts.nexuscloud.cc/Diagnostico-Rede.ps1'
+$diagnosticoUrl = 'https://scripts.nexuscloud.cc/NexusCloud-Toolbox.ps1'
 $diagnosticoCliente = New-Object System.Net.WebClient
 
 try {
